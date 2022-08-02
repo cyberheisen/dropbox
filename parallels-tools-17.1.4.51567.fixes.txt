@@ -1,0 +1,336 @@
+diff -puNr 1/parallels-tools-17.1.4.51567.orig/prl_fs/SharedFolders/Guest/Linux/prl_fs/inode.c parallels-tools-17.1.4.51567/prl_fs/SharedFolders/Guest/Linux/prl_fs/inode.c
+--- 1/parallels-tools-17.1.4.51567.orig/prl_fs/SharedFolders/Guest/Linux/prl_fs/inode.c	2022-05-30 20:22:14.000000000 +0000
++++ parallels-tools-17.1.4.51567/prl_fs/SharedFolders/Guest/Linux/prl_fs/inode.c	2022-06-03 02:16:00.239480903 +0000
+@@ -16,6 +16,9 @@
+ #include <linux/pagemap.h>
+ #include <linux/namei.h>
+ #include <linux/cred.h>
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 18, 0))
++#include <linux/writeback.h>
++#endif
+ 
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 40)) && \
+     (LINUX_VERSION_CODE < KERNEL_VERSION(3, 0, 0))
+@@ -56,7 +59,9 @@ unsigned long *prlfs_dfl( struct dentry
+ 	return (unsigned long *)&(de->d_fsdata);
+ }
+ 
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 18, 0)
++#define prl_uaccess_kernel() (false)
++#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
+ #define prl_uaccess_kernel() uaccess_kernel()
+ #else
+ #define prl_uaccess_kernel() segment_eq(get_fs(), KERNEL_DS)
+@@ -954,7 +959,11 @@ static const struct address_space_operat
+ 	.writepage		= prlfs_writepage,
+ 	.write_begin    = simple_write_begin,
+ 	.write_end      = prlfs_write_end,
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)
++	.dirty_folio    = filemap_dirty_folio,
++#else
+ 	.set_page_dirty = __set_page_dirty_nobuffers,
++#endif
+ };
+ 
+ 
+diff -puNr 1/parallels-tools-17.1.4.51567.orig/prl_fs/Toolgate/Guest/Linux/prl_tg/prltg.c parallels-tools-17.1.4.51567/prl_fs/Toolgate/Guest/Linux/prl_tg/prltg.c
+--- 1/parallels-tools-17.1.4.51567.orig/prl_fs/Toolgate/Guest/Linux/prl_tg/prltg.c	2022-05-30 20:22:14.000000000 +0000
++++ parallels-tools-17.1.4.51567/prl_fs/Toolgate/Guest/Linux/prl_tg/prltg.c	2022-06-03 01:39:47.387571647 +0000
+@@ -382,7 +382,11 @@ static int prl_tg_initialize(struct tg_d
+ 	}
+ #endif
+ 	/* Set DMA ability. Only lower 4G is possible to address */
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)
++	rc = dma_set_mask(&pdev->dev, DMA_BIT_MASK(64));
++#else
+ 	rc = pci_set_dma_mask(pdev, DMA_BIT_MASK(64));
++#endif
+ 	if (rc) {
+ 		printk(KERN_ERR "no usable DMA configuration\n");
+ 		goto err_out;
+diff -puNr 1/parallels-tools-17.1.4.51567.orig/prl_fs/Toolgate/Guest/Linux/prl_tg/prltg_call.c parallels-tools-17.1.4.51567/prl_fs/Toolgate/Guest/Linux/prl_tg/prltg_call.c
+--- 1/parallels-tools-17.1.4.51567.orig/prl_fs/Toolgate/Guest/Linux/prl_tg/prltg_call.c	2022-05-30 20:22:14.000000000 +0000
++++ parallels-tools-17.1.4.51567/prl_fs/Toolgate/Guest/Linux/prl_tg/prltg_call.c	2022-06-03 01:57:24.211040163 +0000
+@@ -76,7 +76,11 @@ static int tg_req_map_internal(struct TG
+ 		uple->p[i] = vmalloc_to_page(mem);
+ 		page_cache_get(uple->p[i]);
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)
++		dst->RequestPages[i] = dma_map_page(&pdev->dev, uple->p[i], 0, PAGE_SIZE, DMA_BIDIRECTIONAL) >> PAGE_SHIFT;
++#else
+ 		dst->RequestPages[i] = pci_map_page(pdev, uple->p[i], 0, PAGE_SIZE, DMA_BIDIRECTIONAL) >> PAGE_SHIFT;
++#endif
+ 		if (!dst->RequestPages[i]) {
+ 			page_cache_release(uple->p[i]);
+ 			goto err;
+@@ -88,7 +92,11 @@ static int tg_req_map_internal(struct TG
+ 
+ err:
+ 	for (i = 0; i < uple->count; i++) {
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)
++		dma_unmap_page(&pdev->dev, dst->RequestPages[i] << PAGE_SHIFT, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#else
+ 		pci_unmap_page(pdev, dst->RequestPages[i] << PAGE_SHIFT, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#endif
+ 		page_cache_release(uple->p[i]);
+ 	}
+ 	kfree(uple);
+@@ -129,7 +137,11 @@ static TG_PAGED_BUFFER *tg_req_map_user_
+ 	pfn = (u64 *)dbuf - 1;
+ 
+ 	for (; npages > 0; npages--, mapped++) {
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)
++		dma_addr_t addr = dma_map_page(&pdev->dev, uple->p[npages-1], 0, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#else
+ 		dma_addr_t addr = pci_map_page(pdev, uple->p[npages-1], 0, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#endif
+ 
+ 		if (!addr) {
+ 			DPRINTK("[3] %d < %d	\n", got, npages);
+@@ -144,7 +156,11 @@ static TG_PAGED_BUFFER *tg_req_map_user_
+ 
+ err_unmap:
+ 	for (i = 0; i < mapped; i++, pfn++)
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)
++		dma_unmap_page(&pdev->dev, *pfn << PAGE_SHIFT, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#else
+ 		pci_unmap_page(pdev, *pfn << PAGE_SHIFT, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#endif
+ 
+ err_put:
+ 	for(i = 0; i < got; i++)
+@@ -176,7 +192,11 @@ static TG_PAGED_BUFFER *tg_req_map_kerne
+ 			goto err;
+ 		}
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)
++		addr = dma_map_page(&pdev->dev, page, 0, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#else
+ 		addr = pci_map_page(pdev, page, 0, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#endif
+ 		if (!addr) {
+ 			DPRINTK("[2] va:%p can't map\n", buffer);
+ 			goto err;
+@@ -189,7 +209,11 @@ static TG_PAGED_BUFFER *tg_req_map_kerne
+ 
+ err:
+ 	for (; i > 0; i--, pfn--)
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)
++		dma_unmap_page(&pdev->dev, *pfn << PAGE_SHIFT, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#else
+ 		pci_unmap_page(pdev, *pfn << PAGE_SHIFT, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#endif
+ 
+ 	return ERR_PTR(-ENOMEM);
+ }
+@@ -203,7 +227,11 @@ static inline int tg_req_unmap_internal(
+ 			dst->RequestSize + ~PAGE_MASK) >> PAGE_SHIFT;
+ 
+ 	for (i = 0; i < count; i++)
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)
++		dma_unmap_page(&req->dev->pci_dev->dev, dst->RequestPages[i] << PAGE_SHIFT, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#else
+ 		pci_unmap_page(req->dev->pci_dev, dst->RequestPages[i] << PAGE_SHIFT, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#endif
+ 
+ 	return count;
+ }
+@@ -264,7 +292,11 @@ static void tg_req_unmap_pages(struct TG
+ 
+ 		pfn = (u64 *)(dbuf + 1);
+ 		for (; npages > 0; npages--, pfn++)
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)
++			dma_unmap_page(&pdev->dev, (*pfn) << PAGE_SHIFT, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#else
+ 			pci_unmap_page(pdev, (*pfn) << PAGE_SHIFT, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#endif
+ 
+ 		dbuf = (TG_PAGED_BUFFER *)pfn;
+ 	}
+@@ -374,7 +406,11 @@ static int tg_req_submit(struct TG_PENDI
+ 	 * also no any offset inside page needed.
+ 	 */
+ 	req->pg = vmalloc_to_page(dst);
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)
++	req->phys = dma_map_page(&dev->pci_dev->dev, vmalloc_to_page(dst), 0, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#else
+ 	req->phys = pci_map_page(dev->pci_dev, vmalloc_to_page(dst), 0, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#endif
+ 	if (!req->phys) {
+ 		DPRINTK("Can not allocate memory for DMA mapping\n");
+ 		goto out;
+@@ -405,7 +441,11 @@ static int tg_req_submit(struct TG_PENDI
+ out:
+ 	if (ret != TG_STATUS_PENDING) {
+ 		page_cache_release(req->pg);
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)
++		dma_unmap_page(&dev->pci_dev->dev, req->phys, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#else
+ 		pci_unmap_page(dev->pci_dev, req->phys, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#endif
+ 	}
+ 
+ 	DPRINTK("EXIT\n");
+@@ -460,7 +500,11 @@ out_wait:
+ 	wait_for_completion(&req->waiting);
+ out:
+ 	page_cache_release(req->pg);
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)
++	dma_unmap_page(&dev->pci_dev->dev, req->phys, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#else
+ 	pci_unmap_page(dev->pci_dev, req->phys, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#endif
+ 	DPRINTK("EXIT\n");
+ 	return ret;
+ }
+diff -puNr 1/parallels-tools-17.1.4.51567.orig/prl_tg/Toolgate/Guest/Linux/prl_tg/prltg.c parallels-tools-17.1.4.51567/prl_tg/Toolgate/Guest/Linux/prl_tg/prltg.c
+--- 1/parallels-tools-17.1.4.51567.orig/prl_tg/Toolgate/Guest/Linux/prl_tg/prltg.c	2022-05-30 20:22:14.000000000 +0000
++++ parallels-tools-17.1.4.51567/prl_tg/Toolgate/Guest/Linux/prl_tg/prltg.c	2022-06-03 01:39:47.387571647 +0000
+@@ -382,7 +382,11 @@ static int prl_tg_initialize(struct tg_d
+ 	}
+ #endif
+ 	/* Set DMA ability. Only lower 4G is possible to address */
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)
++	rc = dma_set_mask(&pdev->dev, DMA_BIT_MASK(64));
++#else
+ 	rc = pci_set_dma_mask(pdev, DMA_BIT_MASK(64));
++#endif
+ 	if (rc) {
+ 		printk(KERN_ERR "no usable DMA configuration\n");
+ 		goto err_out;
+diff -puNr 1/parallels-tools-17.1.4.51567.orig/prl_tg/Toolgate/Guest/Linux/prl_tg/prltg_call.c parallels-tools-17.1.4.51567/prl_tg/Toolgate/Guest/Linux/prl_tg/prltg_call.c
+--- 1/parallels-tools-17.1.4.51567.orig/prl_tg/Toolgate/Guest/Linux/prl_tg/prltg_call.c	2022-05-30 20:22:14.000000000 +0000
++++ parallels-tools-17.1.4.51567/prl_tg/Toolgate/Guest/Linux/prl_tg/prltg_call.c	2022-06-03 01:57:24.211040163 +0000
+@@ -76,7 +76,11 @@ static int tg_req_map_internal(struct TG
+ 		uple->p[i] = vmalloc_to_page(mem);
+ 		page_cache_get(uple->p[i]);
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)
++		dst->RequestPages[i] = dma_map_page(&pdev->dev, uple->p[i], 0, PAGE_SIZE, DMA_BIDIRECTIONAL) >> PAGE_SHIFT;
++#else
+ 		dst->RequestPages[i] = pci_map_page(pdev, uple->p[i], 0, PAGE_SIZE, DMA_BIDIRECTIONAL) >> PAGE_SHIFT;
++#endif
+ 		if (!dst->RequestPages[i]) {
+ 			page_cache_release(uple->p[i]);
+ 			goto err;
+@@ -88,7 +92,11 @@ static int tg_req_map_internal(struct TG
+ 
+ err:
+ 	for (i = 0; i < uple->count; i++) {
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)
++		dma_unmap_page(&pdev->dev, dst->RequestPages[i] << PAGE_SHIFT, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#else
+ 		pci_unmap_page(pdev, dst->RequestPages[i] << PAGE_SHIFT, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#endif
+ 		page_cache_release(uple->p[i]);
+ 	}
+ 	kfree(uple);
+@@ -129,7 +137,11 @@ static TG_PAGED_BUFFER *tg_req_map_user_
+ 	pfn = (u64 *)dbuf - 1;
+ 
+ 	for (; npages > 0; npages--, mapped++) {
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)
++		dma_addr_t addr = dma_map_page(&pdev->dev, uple->p[npages-1], 0, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#else
+ 		dma_addr_t addr = pci_map_page(pdev, uple->p[npages-1], 0, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#endif
+ 
+ 		if (!addr) {
+ 			DPRINTK("[3] %d < %d	\n", got, npages);
+@@ -144,7 +156,11 @@ static TG_PAGED_BUFFER *tg_req_map_user_
+ 
+ err_unmap:
+ 	for (i = 0; i < mapped; i++, pfn++)
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)
++		dma_unmap_page(&pdev->dev, *pfn << PAGE_SHIFT, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#else
+ 		pci_unmap_page(pdev, *pfn << PAGE_SHIFT, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#endif
+ 
+ err_put:
+ 	for(i = 0; i < got; i++)
+@@ -176,7 +192,11 @@ static TG_PAGED_BUFFER *tg_req_map_kerne
+ 			goto err;
+ 		}
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)
++		addr = dma_map_page(&pdev->dev, page, 0, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#else
+ 		addr = pci_map_page(pdev, page, 0, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#endif
+ 		if (!addr) {
+ 			DPRINTK("[2] va:%p can't map\n", buffer);
+ 			goto err;
+@@ -189,7 +209,11 @@ static TG_PAGED_BUFFER *tg_req_map_kerne
+ 
+ err:
+ 	for (; i > 0; i--, pfn--)
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)
++		dma_unmap_page(&pdev->dev, *pfn << PAGE_SHIFT, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#else
+ 		pci_unmap_page(pdev, *pfn << PAGE_SHIFT, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#endif
+ 
+ 	return ERR_PTR(-ENOMEM);
+ }
+@@ -203,7 +227,11 @@ static inline int tg_req_unmap_internal(
+ 			dst->RequestSize + ~PAGE_MASK) >> PAGE_SHIFT;
+ 
+ 	for (i = 0; i < count; i++)
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)
++		dma_unmap_page(&req->dev->pci_dev->dev, dst->RequestPages[i] << PAGE_SHIFT, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#else
+ 		pci_unmap_page(req->dev->pci_dev, dst->RequestPages[i] << PAGE_SHIFT, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#endif
+ 
+ 	return count;
+ }
+@@ -264,7 +292,11 @@ static void tg_req_unmap_pages(struct TG
+ 
+ 		pfn = (u64 *)(dbuf + 1);
+ 		for (; npages > 0; npages--, pfn++)
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)
++			dma_unmap_page(&pdev->dev, (*pfn) << PAGE_SHIFT, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#else
+ 			pci_unmap_page(pdev, (*pfn) << PAGE_SHIFT, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#endif
+ 
+ 		dbuf = (TG_PAGED_BUFFER *)pfn;
+ 	}
+@@ -374,7 +406,11 @@ static int tg_req_submit(struct TG_PENDI
+ 	 * also no any offset inside page needed.
+ 	 */
+ 	req->pg = vmalloc_to_page(dst);
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)
++	req->phys = dma_map_page(&dev->pci_dev->dev, vmalloc_to_page(dst), 0, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#else
+ 	req->phys = pci_map_page(dev->pci_dev, vmalloc_to_page(dst), 0, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#endif
+ 	if (!req->phys) {
+ 		DPRINTK("Can not allocate memory for DMA mapping\n");
+ 		goto out;
+@@ -405,7 +441,11 @@ static int tg_req_submit(struct TG_PENDI
+ out:
+ 	if (ret != TG_STATUS_PENDING) {
+ 		page_cache_release(req->pg);
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)
++		dma_unmap_page(&dev->pci_dev->dev, req->phys, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#else
+ 		pci_unmap_page(dev->pci_dev, req->phys, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#endif
+ 	}
+ 
+ 	DPRINTK("EXIT\n");
+@@ -460,7 +500,11 @@ out_wait:
+ 	wait_for_completion(&req->waiting);
+ out:
+ 	page_cache_release(req->pg);
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,18,0)
++	dma_unmap_page(&dev->pci_dev->dev, req->phys, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#else
+ 	pci_unmap_page(dev->pci_dev, req->phys, PAGE_SIZE, DMA_BIDIRECTIONAL);
++#endif
+ 	DPRINTK("EXIT\n");
+ 	return ret;
+ }
